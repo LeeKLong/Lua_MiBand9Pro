@@ -1,0 +1,11 @@
+# Ignore documentation directory as per user request
+docs/
+examples/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Build/Temporary files
+*.log
+*.tmp
