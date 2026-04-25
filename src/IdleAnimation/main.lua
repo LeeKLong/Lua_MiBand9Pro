@@ -1,157 +1,121 @@
 local lvgl = require("lvgl")
-local math = require("math")
-local os = require("os")
-local topic = require("topic")
-local dataman = require("dataman")
+local activity = nil
+pcall(function() activity = require("activity") end)
 
--- 图片路径前缀
+-- 配置参数
+local CONFIG = {
+    IMAGE_FILES = {"0.bin", "1.bin", "2.bin", "3.bin"},
+    SWITCH_INTERVAL = 500,     -- 图片切换间隔 (ms)
+    DELAY_BEFORE_SHOW = 3000,   -- 亮屏后多久启动动画 (ms)
+    POSITION = { x = 0, y = 0 }
+}
+
+-- 局部状态管理
+local ui = {
+    timers = {},
+    currentIndex = 1,
+    isAnimating = false,
+    userClosed = false
+}
+
+-- 路径处理函数
 local fsRoot = SCRIPT_PATH or "/"
-function imgPath(src)
-    return fsRoot .. src
-end
+local function imgPath(src) return fsRoot .. src end
 
--- 图片文件名称，假设为0.bin, 1.bin, 2.bin, 3.bin
-local IMAGE_FILES = {"0.bin", "1.bin", "2.bin", "3.bin"}
-local IMAGE_COUNT = #IMAGE_FILES
-local SWITCH_INTERVAL = 500  -- 毫秒
-local DELAY_BEFORE_SHOW = 3000  -- 毫秒
-
--- 位置设置，请根据需要修改 x, y 坐标
--- 例如：local IMAGE_POSITION = { x = 100, y = 100 }
-local IMAGE_POSITION = { x = 0, y = 0 }
-
--- 准备主函数
 local function entry()
-    -- 创建根容器
-    local root = lvgl.Object(nil, {
+    -- 1. UI 构建
+    ui.root = lvgl.Object(nil, {
         w = lvgl.HOR_RES(),
         h = lvgl.VER_RES(),
         bg_opa = 0,
         border_width = 0,
-        pad_all = 0,
+        pad_all = 0
     })
-    root:clear_flag(lvgl.FLAG.SCROLLABLE)
-    root:add_flag(lvgl.FLAG.EVENT_BUBBLE)
-    
-    -- 创建图片控件，初始隐藏
-    local img = lvgl.Image(root, {
-        src = imgPath(IMAGE_FILES[1]),
-        x = IMAGE_POSITION.x,
-        y = IMAGE_POSITION.y,
+    ui.root:clear_flag(lvgl.FLAG.SCROLLABLE)
+    ui.root:add_flag(lvgl.FLAG.EVENT_BUBBLE)
+
+    ui.img = lvgl.Image(ui.root, {
+        src = imgPath(CONFIG.IMAGE_FILES[1]),
+        x = CONFIG.POSITION.x,
+        y = CONFIG.POSITION.y
     })
-    img:add_flag(lvgl.FLAG.HIDDEN)
-    
-    -- 获取图片尺寸并设置宽高
-    local imgWidth, imgHeight = img:get_img_size()
-    if imgWidth and imgHeight then
-        img:set { w = imgWidth, h = imgHeight }
-    end
-    
-    -- 状态变量
-    local currentIndex = 1  -- 当前显示图片索引（1-based）
-    local animTimer = nil   -- 动画定时器
-    local startTimer = nil  -- 延迟启动定时器
-    local isAnimating = false
-    local userClosed = false  -- 用户是否手动关闭了动画
-    
-    -- 更新图片显示
-    local function updateImage()
-        currentIndex = currentIndex + 1
-        if currentIndex > IMAGE_COUNT then
-            currentIndex = 1
+    ui.img:add_flag(lvgl.FLAG.HIDDEN)
+    ui.img:add_flag(lvgl.FLAG.CLICKABLE)
+    ui.img:add_flag(lvgl.FLAG.EVENT_BUBBLE) -- 确保不拦截系统级长按
+
+    -- 2. 动画控制逻辑
+    local function stopAnimation()
+        if ui.timers.anim then 
+            ui.timers.anim:delete() 
+            ui.timers.anim = nil 
         end
-        img:set { src = imgPath(IMAGE_FILES[currentIndex]) }
+        ui.isAnimating = false
+        ui.img:add_flag(lvgl.FLAG.HIDDEN)
     end
-    
-    -- 开始动画
+
+    local function updateImage()
+        ui.currentIndex = (ui.currentIndex % #CONFIG.IMAGE_FILES) + 1
+        ui.img:set({ src = imgPath(CONFIG.IMAGE_FILES[ui.currentIndex]) })
+    end
+
     local function startAnimation()
-        if isAnimating or userClosed then return end
+        -- 如果已在运行、用户已手动关闭、或者处于编辑模式，则不启动
+        local isEdit = activity and activity.isShown({appID=2, pageID=2}) or false
+        if ui.isAnimating or ui.userClosed or isEdit then return end
         
-        -- 显示图片
-        img:clear_flag(lvgl.FLAG.HIDDEN)
-        isAnimating = true
+        ui.img:clear_flag(lvgl.FLAG.HIDDEN)
+        ui.isAnimating = true
         
-        -- 创建定时器，每 SWITCH_INTERVAL 毫秒切换图片
-        animTimer = lvgl.Timer({
-            period = SWITCH_INTERVAL,
-            cb = function(t)
+        ui.timers.anim = lvgl.Timer({
+            period = CONFIG.SWITCH_INTERVAL,
+            cb = function()
                 updateImage()
             end
         })
     end
-    
-    -- 停止动画
-    local function stopAnimation()
-        if animTimer then
-            animTimer:pause()  -- 暂停定时器
-            animTimer = nil
-        end
-        isAnimating = false
-        img:add_flag(lvgl.FLAG.HIDDEN)
-    end
-    
-    -- 延迟启动动画
+
+    -- 3. 延时启动调度
     local function scheduleStart()
-        -- 如果已有定时器，先取消
-        if startTimer then
-            startTimer:pause()
-            startTimer = nil
-        end
-        
-        -- 如果用户手动关闭了，不启动
-        if userClosed then return end
-        
-        startTimer = lvgl.Timer({
-            period = DELAY_BEFORE_SHOW,
+        if ui.timers.start then ui.timers.start:delete() ui.timers.start = nil end
+        if ui.userClosed then return end
+
+        ui.timers.start = lvgl.Timer({
+            period = CONFIG.DELAY_BEFORE_SHOW,
             cb = function(t)
                 startAnimation()
-                t:pause()  -- 执行后暂停，防止重复
+                t:delete() -- 执行一次后立即销毁，防止内存堆积
+                ui.timers.start = nil
             end
         })
     end
-    
-    -- 点击图片关闭动画
-    img:add_flag(lvgl.FLAG.CLICKABLE)
-    img:onevent(lvgl.EVENT.SHORT_CLICKED, function(obj, code)
-        -- 停止启动定时器
-        if startTimer then
-            startTimer:pause()
-            startTimer = nil
-        end
-        -- 停止动画
+
+    -- 4. 交互：点击关闭
+    ui.img:onClicked(function()
+        if ui.timers.start then ui.timers.start:delete() ui.timers.start = nil end
         stopAnimation()
-        -- 标记为用户手动关闭
-        userClosed = true
+        ui.userClosed = true -- 本次亮屏不再自动弹出
     end)
-    
-    -- 屏幕状态回调
-    local function screenONCb()
-        -- 屏幕打开，重置用户关闭标志，重新调度启动
-        userClosed = false
+
+    -- 5. 生命周期管理
+    local function screenON()
+        ui.userClosed = false
         scheduleStart()
     end
-    
-    local function screenOFFCb()
-        -- 屏幕关闭，停止所有定时器和动画
-        if startTimer then
-            startTimer:pause()
-            startTimer = nil
-        end
+
+    local function screenOFF()
+        if ui.timers.start then ui.timers.start:delete() ui.timers.start = nil end
         stopAnimation()
-        -- 屏幕关闭时重置用户关闭标志，这样下次亮屏会重新开始
-        userClosed = false
     end
+
+    -- 初始执行
+    screenON()
     
-    -- 初始启动
-    scheduleStart()
-    
-    return screenONCb, screenOFFCb
+    return screenON, screenOFF
 end
 
--- 执行主函数
 local on, off = entry()
 
--- 订阅屏幕状态变化
+-- 6. 系统屏幕状态回调
 function ScreenStateChangedCB(pre, now, reason)
     if pre ~= "ON" and now == "ON" then
         on()

@@ -1,6 +1,7 @@
 # Ignore documentation directory as per user request
 docs/
 examples/
+other/
 
 # OS generated files
 .DS_Store
