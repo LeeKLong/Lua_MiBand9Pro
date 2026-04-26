@@ -2,6 +2,7 @@
 docs/
 examples/
 other/
+.agents/skills/
 
 # OS generated files
 .DS_Store
